@@ -8,7 +8,6 @@ Ce script automatise le processus de commande sur kfcsenegal.sn :
 3. Selectionne la zone de livraison (SICAP LIBERTE par defaut)
 4. Affiche le menu et permet d'ajouter des articles au panier
 5. Finalise la commande avec paiement en especes
-6. Envoie un email de confirmation
 
 Commandes utiles pendant la commande :
     lieu    - Changer la zone de livraison
@@ -18,39 +17,50 @@ Usage:
     uv run python kfc_order.py [--visible]
 """
 
-import json
-import smtplib
 import sys
 import time
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 
 from database import (
     init_db, get_user, save_user, update_user, user_exists,
-    save_order, get_last_order, has_orders,
+    save_order, get_last_order,
     DEFAULT_ZONE,
 )
 
 BASE_URL = "https://kfcsenegal.sn"
 RESTAURANT_URL = f"{BASE_URL}/restaurant/kfc-bourguiba"
-RESTAURANT_DETAIL_URL = f"{BASE_URL}/restaurant-detail/kfc-bourguiba"
 COMMANDE_URL = f"{BASE_URL}/commande"
 
 ZONES_CACHE: list[dict] = []
+
+
+def block_non_essential(route) -> None:
+    """Block analytics, fonts, images to reduce requests and avoid rate limiting.
+    Allows: document (HTML), xhr/fetch (API calls), and build assets (JS/CSS).
+    """
+    url = route.request.url
+    rt = route.request.resource_type
+    if "kfcsenegal.sn" in url:
+        if rt in ("document", "xhr", "fetch"):
+            route.continue_()
+        elif "/build/assets/" in url:
+            route.continue_()
+        else:
+            route.abort()
+    else:
+        route.abort()
 
 
 def navigate_with_retry(page, url: str, max_retries: int = 3, wait_between: int = 30) -> bool:
     """Navigate to URL with retry on rate limiting (HTTP 429)."""
     for attempt in range(max_retries):
         try:
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
             time.sleep(3)
 
-            content = page.evaluate("() => document.body.innerText || ''")
             title = page.evaluate("() => document.title || ''")
-            if "429" in title or "Slow down" in content or "rate limit" in content.lower():
+            if "429" in title:
                 if attempt < max_retries - 1:
                     print(f"  Rate-limite (429). Attente de {wait_between}s... (tentative {attempt + 1}/{max_retries})")
                     time.sleep(wait_between)
@@ -64,6 +74,17 @@ def navigate_with_retry(page, url: str, max_retries: int = 3, wait_between: int 
                 time.sleep(wait_between)
                 continue
             return False
+    return False
+
+
+def wait_for_zone_selection(page, timeout: int = 30) -> bool:
+    """Attend que le selecteur de zone soit disponible."""
+    start = time.time()
+    while time.time() - start < timeout:
+        has_zone = page.evaluate('() => !!document.querySelector(\'select[name="zone"]\')')
+        if has_zone:
+            return True
+        time.sleep(1)
     return False
 
 
@@ -144,12 +165,12 @@ def get_zones(page) -> list[dict]:
 
     zones = page.evaluate("""
         () => {
-            const options = document.querySelectorAll('#zone option[value]');
-            return Array.from(options).map(opt => ({
+            const options = document.querySelectorAll('select[name="zone"] option[value]');
+            return Array.from(options).filter(opt => opt.value !== '' && !opt.disabled).map(opt => ({
                 id: opt.value,
-                name: opt.textContent.trim(),
+                name: opt.textContent.trim().replace(/\\s+/g, ' '),
                 frais: parseInt(opt.getAttribute('data-frais') || '0')
-            })).filter(z => z.id !== '');
+            }));
         }
     """)
     ZONES_CACHE = zones
@@ -158,11 +179,19 @@ def get_zones(page) -> list[dict]:
 
 def ask_zone(page, user: dict) -> dict:
     """Demande a l'utilisateur de choisir une zone de livraison.
-    Si 'lieu' est tape, propose de changer la zone.
-    Retourne la zone selectionnee.
+    Recharge la page d'atterrissage pour lire les zones disponibles.
     """
     current_zone = {"id": user.get("zone_id", DEFAULT_ZONE["id"]),
                     "name": user.get("zone_name", DEFAULT_ZONE["name"])}
+
+    print("\n  Chargement des zones de livraison...")
+    if not navigate_with_retry(page, RESTAURANT_URL):
+        print("  Impossible de charger la page des zones.")
+        return current_zone
+
+    if not wait_for_zone_selection(page, timeout=15):
+        print("  Selecteur de zone non trouve.")
+        return current_zone
 
     zones = get_zones(page)
     if not zones:
@@ -188,58 +217,96 @@ def ask_zone(page, user: dict) -> dict:
     return selected
 
 
-def select_zone_on_site(page, zone_id: str) -> None:
-    """Selectionne une zone via Choices.js et soumet le formulaire."""
-    page.evaluate(f"""
-        () => {{
+def select_zone_on_site(page, zone_id: str) -> bool:
+    """Selectionne une zone et soumet le formulaire GET.
+    Retourne True si la selection a reussi.
+    """
+    page.evaluate("""
+        (zoneId) => {
             const sel = document.querySelector('select[name="zone"]');
-            if (sel) {{
-                sel.value = '{zone_id}';
-                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            }}
-            const choicesItems = document.querySelectorAll('.choices__item[data-value="{zone_id}"]');
-            if (choicesItems.length > 0) {{
-                choicesItems[0].click();
-            }}
-        }}
-    """)
+            if (sel) {
+                sel.value = zoneId;
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }
+    """, zone_id)
     time.sleep(1)
 
-    form = page.query_selector("form")
-    if form:
-        form.evaluate("f => f.submit()")
-    else:
-        page.click("button.btn-order, button[type='submit']")
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+        page.evaluate("""() => document.querySelector('select[name="zone"]').closest("form").submit()""")
+    time.sleep(3)
 
-    page.wait_for_load_state("networkidle", timeout=15000)
-    time.sleep(2)
+    title = page.evaluate("() => document.title || ''")
+    return "429" not in title
+
+
+def load_menu(page, zone_id: str | None = None) -> list[dict]:
+    """Charge le menu depuis la page Restaurant/Show (Inertia props).
+    Le flux est : page d'atterrissage -> zone -> cooldown -> page restaurant.
+    """
+    print("\n  Chargement de la page d'atterrissage...")
+    if not navigate_with_retry(page, RESTAURANT_URL):
+        print("  Impossible d'acceder au site.")
+        return []
+
+    if not wait_for_zone_selection(page, timeout=15):
+        print("  Selecteur de zone non trouve.")
+        return []
+
+    target = zone_id or DEFAULT_ZONE["id"]
+    print("  Selection de la zone de livraison...")
+    if not select_zone_on_site(page, target):
+        print("  Echec de la selection de zone.")
+
+    print("  Attente de 60s pour le rate-limiter...")
+    time.sleep(60)
+
+    print("  Chargement du menu du restaurant...")
+    if not navigate_with_retry(page, RESTAURANT_URL):
+        print("  Impossible de charger le menu.")
+        return []
+
+    time.sleep(5)
+
+    products = scrape_menu(page)
+    if not products:
+        print("  Le menu n'a pas pu etre charge.")
+        print("  Essayez avec : uv run python kfc_order.py --visible")
+        return products
+
+    print("  Menu charge ! Attente de 30s avant les appels API...")
+    time.sleep(30)
+    return products
 
 
 def scrape_menu(page) -> list[dict]:
-    """Recupere les produits du menu via les props Inertia."""
+    """Recupere les produits depuis les props Inertia de Restaurant/Show."""
     return page.evaluate("""
         () => {
             const appEl = document.querySelector('#app[data-page]');
             if (!appEl) return [];
             try {
                 const pageData = JSON.parse(appEl.getAttribute('data-page'));
-                const props = pageData.props || {};
-                const categories = props.categories || props.restaurant?.categories || [];
+                if (pageData.component !== 'Restaurant/Show') return [];
+                const categories = pageData.props?.categories || [];
                 const products = [];
-                if (Array.isArray(categories)) {
-                    for (const cat of categories) {
-                        const items = cat.produits || cat.products || [];
-                        for (const item of items) {
-                            products.push({
-                                id: item.id,
-                                nom: item.nom || item.name || item.libelle || '',
-                                description: item.description || '',
-                                prix: item.prix || item.price || 0,
-                                image: item.image || item.photo || '',
-                                category: cat.nom || cat.name || cat.libelle || '',
-                                disponible: item.disponible !== false
-                            });
-                        }
+                for (const cat of categories) {
+                    const items = cat.produits || [];
+                    for (const item of items) {
+                        products.push({
+                            id: String(item.id),
+                            nom: item.nom || '',
+                            description: item.description || '',
+                            prix: item.prix || 0,
+                            category: cat.libelle || cat.nom || '',
+                            disponible: item.disponible !== false,
+                            complements: (item.complements || []).map(c => ({
+                                id: c.id, nom: c.nom || c.libelle || '', prix: c.prix || 0
+                            })),
+                            supplements: (item.supplements || []).map(s => ({
+                                id: s.id, nom: s.nom || s.libelle || '', prix: s.prix || 0
+                            }))
+                        });
                     }
                 }
                 return products;
@@ -248,188 +315,145 @@ def scrape_menu(page) -> list[dict]:
     """)
 
 
-def scrape_menu_from_dom(page) -> list[dict]:
-    """Fallback : recupere les produits depuis le DOM rendu."""
-    return page.evaluate("""
-        () => {
-            const products = [];
-            const selectors = [
-                '.product-card', '[data-product-id]', '.card-product',
-                '.food-card', '.menu-item', '.product-item',
-                '[class*="product"]', '[class*="menu"]'
-            ];
-            const seen = new Set();
+def add_to_cart(page, product: dict, quantite: int = 1) -> bool:
+    """Ajoute un produit au panier via l'API /api/panier/ajouter.
+    En cas de rate-limit (429), attend 30s et reessai une fois.
+    """
+    for attempt in range(2):
+        try:
+            result = page.evaluate("""
+                async ({produitId, quantite, complements, supplements}) => {
+                    try {
+                        const xsrf = document.cookie.split('; ')
+                            .find(c => c.startsWith('XSRF-TOKEN='))
+                            ?.split('=').slice(1).join('=');
+                        const decodedXsrf = xsrf ? decodeURIComponent(xsrf) : '';
 
-            for (const sel of selectors) {
-                const cards = document.querySelectorAll(sel);
-                cards.forEach(card => {
-                    const id = card.getAttribute('data-product-id')
-                        || card.getAttribute('data-id')
-                        || card.getAttribute('data-produit-id') || '';
-                    if (id && seen.has(id)) return;
-                    if (id) seen.add(id);
-
-                    const nameEl = card.querySelector(
-                        '.product-title, .card-title, h3, h4, .product-name, .item-name, [class*="title"], [class*="name"]'
-                    );
-                    const priceEl = card.querySelector(
-                        '.product-price, .card-price, .price, span[style*="color"], [class*="price"]'
-                    );
-                    const imgEl = card.querySelector('img');
-                    const addBtn = card.querySelector(
-                        'button[data-product-id], button[onclick], .add-to-cart, [class*="add"], [class*="cart"]'
-                    );
-                    const btnId = addBtn
-                        ? (addBtn.getAttribute('data-product-id')
-                            || addBtn.getAttribute('data-produit-id')
-                            || addBtn.getAttribute('onclick')?.match(/\\d+/)?.[0] || '')
-                        : '';
-
-                    if (nameEl && nameEl.textContent.trim().length > 0) {
-                        products.push({
-                            id: id || btnId || String(products.length + 1),
-                            nom: nameEl.textContent.trim(),
-                            prix: priceEl ? priceEl.textContent.trim() : '0',
-                            image: imgEl ? imgEl.src : '',
-                            disponible: !card.classList.contains('disabled')
-                                && !card.querySelector('.out-of-stock, .unavailable')
+                        const payload = {
+                            produit_id: parseInt(produitId),
+                            quantite: quantite,
+                            complements: complements || [],
+                            supplements: supplements || []
+                        };
+                        const response = await fetch('/api/panier/ajouter', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'X-XSRF-TOKEN': decodedXsrf,
+                                'Accept': 'application/json',
+                            },
+                            body: JSON.stringify(payload),
+                            credentials: 'same-origin'
                         });
-                    }
-                });
-            }
-
-            if (products.length === 0) {
-                const allBtns = document.querySelectorAll('button');
-                allBtns.forEach(btn => {
-                    const onclick = btn.getAttribute('onclick') || '';
-                    const match = onclick.match(/addToCart\\((\\d+)/i) || onclick.match(/ajouter\\((\\d+)/i);
-                    if (match) {
-                        const card = btn.closest('.card, .product, [class*="item"], div');
-                        const name = card ? (card.querySelector('h3, h4, .title, .name') || {}).textContent : null;
-                        if (name) {
-                            products.push({
-                                id: match[1],
-                                nom: name.trim(),
-                                prix: '0',
-                                image: '',
-                                disponible: true
-                            });
+                        const text = await response.text();
+                        try {
+                            const data = JSON.parse(text);
+                            return { ok: response.ok, status: response.status, data: data };
+                        } catch {
+                            return { ok: false, status: response.status, error: 'Rate-limite ou HTML recu' };
                         }
+                    } catch(e) {
+                        return { ok: false, error: e.message };
                     }
-                });
-            }
-
-            return products;
-        }
-    """)
-
-
-def add_to_cart(page, product_id: str, quantite: int = 1) -> bool:
-    """Ajoute un produit au panier via le bouton ajouter."""
-    try:
-        btn = page.query_selector(
-            f'button[data-product-id="{product_id}"], '
-            f'button[onclick*="{product_id}"], '
-            f'[data-product-id="{product_id}"] button'
-        )
-        if not btn:
-            return False
-
-        btn.click()
-        time.sleep(1)
-
-        if quantite > 1:
-            plus_btn = page.query_selector(
-                '.quantity-plus, button:has-text("+"), [data-action="increase"]'
-            )
-            for _ in range(quantite - 1):
-                if plus_btn:
-                    plus_btn.click()
-                    time.sleep(0.3)
-
-        return True
-    except Exception as e:
-        print(f"  Erreur ajout panier: {e}")
-        return False
-
-
-def add_to_cart_api(page, product_id: str, quantite: int = 1) -> bool:
-    """Ajoute un produit au panier via l'API."""
-    try:
-        result = page.evaluate("""
-            async ({productId, quantite}) => {
-                try {
-                    const response = await fetch('/api/panier/ajouter', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-Requested-With': 'XMLHttpRequest',
-                            'Accept': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            produit_id: parseInt(productId),
-                            quantite: quantite
-                        }),
-                        credentials: 'same-origin'
-                    });
-                    const data = await response.json();
-                    return { ok: response.ok, status: response.status, data: data };
-                } catch(e) {
-                    return { ok: false, error: e.message };
                 }
-            }
-        """, {"productId": product_id, "quantite": quantite})
-        return result.get("ok", False)
-    except Exception as e:
-        print(f"  Erreur API panier: {e}")
-        return False
+            """, {
+                "produitId": product["id"],
+                "quantite": quantite,
+                "complements": [],
+                "supplements": [],
+            })
+            if result.get("ok"):
+                return True
+            if result.get("status") == 429 and attempt == 0:
+                print("  Rate-limite (429). Attente de 30s...")
+                time.sleep(30)
+                continue
+            msg = result.get("data", {}).get("message", result.get("error", ""))
+            print(f"  API erreur ({result.get('status', '?')}): {msg}")
+            return False
+        except Exception as e:
+            print(f"  Erreur ajout panier: {e}")
+            return False
+    return False
 
 
 def checkout(page, user: dict) -> bool:
-    """Remplit le formulaire de commande et valide."""
-    print("\n  Navigation vers la page de commande...")
-    if not navigate_with_retry(page, COMMANDE_URL):
+    """Navigue vers la page de commande et remplit le formulaire."""
+    # Deverrouiller toutes les ressources pour que Vue se monte
+    page.unroute("**/*")
+
+    print("\n  Attente de 60s avant le checkout...")
+    time.sleep(60)
+
+    print("  Navigation vers la page de commande...")
+    if not navigate_with_retry(page, COMMANDE_URL, wait_between=60):
         print("  Impossible de charger la page de commande.")
         return False
-    time.sleep(3)
+    time.sleep(5)
 
+    # Attendre que le composant Commande/Index soit charge
+    print("  Attente du chargement de la page...")
+    for _ in range(20):
+        ready = page.evaluate("""
+            () => {
+                const el = document.querySelector('#app[data-page]');
+                if (!el) return false;
+                try {
+                    const d = JSON.parse(el.getAttribute('data-page'));
+                    return d.component === 'Commande/Index';
+                } catch(e) { return false; }
+            }
+        """)
+        if ready:
+            break
+        time.sleep(3)
+
+    # Attendre que le panier soit charge via API
+    print("  Attente du chargement du panier...")
+    for _ in range(20):
+        cart_ok = page.evaluate("""
+            () => {
+                const body = document.body.innerText || '';
+                return body.includes('Confirmer la commande') || body.includes('Total');
+            }
+        """)
+        if cart_ok:
+            break
+        time.sleep(3)
+
+    # Remplir le formulaire via JS pour trigger les v-model Vue
     page.evaluate("""
         (userData) => {
-            const setVal = (selector, value) => {
+            const setInput = (selector, value) => {
                 const el = document.querySelector(selector);
                 if (el) {
-                    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value'
-                    )?.set || Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    )?.set;
-                    if (nativeInputValueSetter) {
-                        nativeInputValueSetter.call(el, value);
-                    } else {
-                        el.value = value;
-                    }
+                    const proto = el.tagName === 'TEXTAREA'
+                        ? window.HTMLTextAreaElement.prototype
+                        : window.HTMLInputElement.prototype;
+                    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                    nativeSetter.call(el, value);
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.dispatchEvent(new Event('blur', { bubbles: true }));
                 }
             };
-            setVal('#name, input[name="name"]', userData.nom);
-            setVal('#telephone, input[name="telephone"]', userData.telephone);
-            setVal('#email, input[name="email"]', userData.email);
-            setVal('#adresse, input[name="adresse"]', userData.adresse);
-            setVal('#note, textarea[name="note"]', '');
+            setInput('input[name="name"], #name', userData.nom);
+            setInput('input[name="telephone"], #telephone', userData.telephone);
+            setInput('input[name="email"], #email', userData.email);
+            setInput('input[name="adresse"], #adresse', userData.adresse);
+            setInput('textarea[name="note"], #note', '');
 
-            const especesRadio = document.querySelector('input[value="especes"]');
-            if (especesRadio) {
-                especesRadio.checked = true;
-                especesRadio.click();
-                especesRadio.dispatchEvent(new Event('change', { bubbles: true }));
-            }
+            const radios = document.querySelectorAll('input[value="especes"]');
+            radios.forEach(r => {
+                r.checked = true;
+                r.click();
+                r.dispatchEvent(new Event('change', { bubbles: true }));
+            });
         }
     """, user)
-    time.sleep(1)
+    time.sleep(2)
 
-    print("  Formulaire rempli avec vos informations.")
+    print("  Formulaire rempli.")
     print("  Paiement : Especes a la livraison")
 
     confirmer = input("\n  Confirmer la commande ? (Y/N) : ").strip().upper()
@@ -437,56 +461,60 @@ def checkout(page, user: dict) -> bool:
         print("  Commande annulee.")
         return False
 
-    submit_btn = page.query_selector(
-        'button:has-text("Confirmer la commande"), '
-        'button.btn-primary[type="submit"], '
-        'button:has-text("Confirmer")'
-    )
+    print("  Attente de 30s avant soumission...")
+    time.sleep(30)
+
+    # Cliquer "Confirmer la commande"
+    submit_btn = page.query_selector('button:has-text("Confirmer la commande")')
+    if not submit_btn:
+        submit_btn = page.query_selector('button[type="submit"]')
+
     if submit_btn:
-        submit_btn.click()
-        time.sleep(5)
-        print("\n  === Commande envoyee ! ===")
+        submit_btn.click(force=True)
+
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+        except PwTimeout:
+            pass
+
+        time.sleep(3)
+
+        title = page.evaluate("() => document.title || ''")
+        if "429" in title:
+            print("  Rate-limite. Attente de 60s et reessai...")
+            time.sleep(60)
+            submit_btn = page.query_selector('button:has-text("Confirmer la commande")')
+            if not submit_btn:
+                submit_btn = page.query_selector('button[type="submit"]')
+            if submit_btn:
+                submit_btn.click(force=True)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except PwTimeout:
+                    pass
+                time.sleep(3)
+
+        current_url = page.url
+        if "commande" not in current_url or "confirmation" in current_url or "merci" in current_url.lower():
+            print("\n  === Commande envoyee ! ===")
+            print(f"  URL finale : {current_url}")
+            return True
+
+        page_text = page.evaluate("() => document.body.innerText || ''")
+        if "erreur" in page_text.lower() or "error" in page_text.lower():
+            print("  Erreur detectee lors de la soumission.")
+            return False
+
+        print(f"\n  Commande soumise (verifier manuellement). URL : {current_url}")
         return True
     else:
-        print("  Bouton de confirmation non trouve.")
+        print("  Bouton non trouve.")
+        buttons = page.evaluate("""
+            () => Array.from(document.querySelectorAll('button'))
+                .map(b => b.textContent.trim()).filter(t => t)
+        """)
+        print(f"  Boutons visibles : {buttons}")
         return False
-
-
-def send_confirmation_email(user: dict, cart_items: list[dict], zone_name: str) -> None:
-    """Envoie un email de confirmation de commande."""
-    if not user.get("email"):
-        print("  Pas d'email configure, envoi ignore.")
-        return
-
-    print(f"\n  Envoi de l'email de confirmation a {user['email']}...")
-
-    corps = f"Bonjour {user['nom']},\n\n"
-    corps += "Votre commande KFC a ete effectuee avec succes !\n\n"
-    corps += f"Zone de livraison : {zone_name}\n"
-    corps += f"Adresse : {user['adresse']}\n"
-    corps += f"Telephone : {user['telephone']}\n\n"
-    corps += "Articles commandes :\n"
-    for item in cart_items:
-        a = item["article"]
-        q = item["quantite"]
-        corps += f"  - {a['nom']} x{q}\n"
-    corps += "\nPaiement : Especes a la livraison\n"
-    corps += "\nMerci pour votre commande !\n"
-    corps += "KFC Senegal - kfcsenegal.sn\n"
-
-    msg = MIMEMultipart()
-    msg["From"] = "KFC Senegal <noreply@kfcsenegal.sn>"
-    msg["To"] = user["email"]
-    msg["Subject"] = "KFC - Confirmation de commande"
-    msg.attach(MIMEText(corps, "plain", "utf-8"))
-
-    try:
-        with smtplib.SMTP("localhost", 25, timeout=10) as server:
-            server.sendmail(msg["From"], [user["email"]], msg.as_string())
-        print("  Email envoye !")
-    except Exception as e:
-        print(f"  Envoi email echoue (non bloquant) : {e}")
-        print("  Votre commande a bien ete passee malgre l'echec de l'email.")
 
 
 def display_menu(products: list[dict]) -> dict:
@@ -600,7 +628,6 @@ Description:
     - Tapez 'lieu' pour changer de zone, 'nouveau' pour ajouter un profil
     - Affiche le menu et vous permet de choisir vos articles
     - Finalise la commande avec paiement en especes
-    - Envoie un email de confirmation
     - Enregistre l'historique des commandes
         """)
         return
@@ -626,59 +653,14 @@ Description:
             ),
         )
         page = context.new_page()
+        page.route("**/*", block_non_essential)
 
         try:
-            print("  Ouverture de la page KFC...")
-            if not navigate_with_retry(page, RESTAURANT_URL):
-                print("  Impossible d'acceder au site. Verifiez votre connexion.")
-                return
-
             selected_zone = {"id": user["zone_id"], "name": user["zone_name"]}
             print(f"\n  Zone : {selected_zone['name']}")
-            print("  Selection de la zone sur le site...")
-            select_zone_on_site(page, selected_zone["id"])
-            print("  Zone configuree !")
 
-            print("  Attente avant de charger le menu...")
-            time.sleep(5)
-
-            if not navigate_with_retry(page, RESTAURANT_DETAIL_URL):
-                print("  Impossible de charger la page du restaurant.")
-                return
-            time.sleep(5)
-
-            print("  Chargement du menu...")
-            products = scrape_menu(page)
-
+            products = load_menu(page, zone_id=selected_zone["id"])
             if not products:
-                print("  Tentative de chargement du menu via le DOM...")
-                products = scrape_menu_from_dom(page)
-
-            if not products:
-                print("\n  Menu non detecte automatiquement.")
-                print("  Le site charge le menu dynamiquement.")
-                print("  Tentative via l'API des produits...")
-
-                api_products = page.evaluate("""
-                    async () => {
-                        try {
-                            const resp = await fetch('/api/produits', {
-                                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                                credentials: 'same-origin'
-                            });
-                            if (resp.ok) return await resp.json();
-                            return null;
-                        } catch(e) { return null; }
-                    }
-                """)
-                if api_products:
-                    products = api_products if isinstance(api_products, list) else api_products.get("data", [])
-
-            if not products:
-                print("\n  Impossible de charger le menu automatiquement.")
-                print("  Le site utilise un rendu dynamique complexe.")
-                print("  Essayez avec le mode visible :")
-                print("    uv run python kfc_order.py --visible")
                 return
 
             product_map = display_menu(products)
@@ -694,14 +676,8 @@ Description:
                     if choix_article.lower() == "lieu":
                         selected_zone = ask_zone(page, user)
                         print(f"\n  Nouvelle zone : {selected_zone['name']}")
-                        print("  Selection de la zone sur le site...")
-                        select_zone_on_site(page, selected_zone["id"])
-                        time.sleep(5)
-                        if not navigate_with_retry(page, RESTAURANT_DETAIL_URL):
-                            print("  Impossible de recharger le menu.")
-                            return
-                        time.sleep(5)
-                        products = scrape_menu(page) or scrape_menu_from_dom(page)
+                        print("  Rechargement du menu...")
+                        products = load_menu(page, zone_id=selected_zone["id"])
                         if products:
                             product_map = display_menu(products)
                         continue
@@ -720,20 +696,21 @@ Description:
                         continue
 
                     quantite_str = input("  Quantite (defaut: 1) : ").strip()
-                    quantite = int(quantite_str) if quantite_str.isdigit() else 1
+                    quantite = int(quantite_str) if quantite_str.isdigit() and int(quantite_str) > 0 else 1
 
                     article = product_map[choix_article]
                     print(f"\n  Ajout : {article['nom']} x{quantite}")
 
-                    success = add_to_cart_api(page, article["id"], quantite)
-                    if not success:
-                        success = add_to_cart(page, article["id"], quantite)
+                    success = add_to_cart(page, article, quantite)
 
                     if success:
                         cart_items.append({"article": article, "quantite": quantite})
                         print("  Ajoute au panier !")
+                        time.sleep(10)
                     else:
                         print("  Echec de l'ajout au panier.")
+                        print("  Attente de 30s avant de reessayer...")
+                        time.sleep(30)
 
                     autre = input("\n  Autre chose ? (Y/N) : ").strip().upper()
                     if autre != "Y":
@@ -744,17 +721,20 @@ Description:
                 return
 
             print("\n  --- Recapitulatif de la commande ---")
+            total = 0
             for item in cart_items:
                 a = item["article"]
                 q = item["quantite"]
-                print(f"  - {a['nom']} x{q}")
+                prix = a.get("prix", 0)
+                sous_total = prix * q
+                total += sous_total
+                print(f"  - {a['nom']} x{q} = {sous_total:,} FCFA".replace(",", " "))
+            print(f"\n  Total : {total:,} FCFA".replace(",", " "))
             print(f"  Zone : {selected_zone['name']}")
             print("-------------------------------------")
 
             if checkout(page, user):
                 save_order(cart_items, selected_zone["id"], selected_zone["name"])
-                send_confirmation_email(user, cart_items, selected_zone["name"])
-                print("  Verifiez votre boite mail pour la confirmation.")
 
         except PwTimeout:
             print("\n  Timeout : le site met trop de temps a repondre.")
