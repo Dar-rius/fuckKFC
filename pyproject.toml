@@ -1,0 +1,12 @@
+[project]
+name = "fuckkfc"
+version = "0.1.0"
+description = "Script de commande automatise pour KFC Senegal"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.40.0",
+]
+
+[project.scripts]
+kfc = "kfc_order:main"
