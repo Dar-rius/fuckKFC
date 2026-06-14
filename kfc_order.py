@@ -29,6 +29,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 
 from database import (
     init_db, get_user, save_user, update_user, user_exists,
+    save_order, get_last_order, has_orders,
     DEFAULT_ZONE,
 )
 
@@ -508,6 +509,50 @@ def display_menu(products: list[dict]) -> dict:
     return product_map
 
 
+def ask_reorder(product_map: dict) -> list[dict] | None:
+    """Propose de refaire la derniere commande. Retourne les items ou None."""
+    last = get_last_order()
+    if not last:
+        return None
+
+    print("\n  --- Derniere commande ---")
+    for item in last["items"]:
+        print(f"  - {item['nom']} x{item['quantite']}")
+    print(f"  Zone : {last['zone_name']}")
+    print(f"  Date : {last['created_at'][:16]}")
+
+    choix = input("\n  Refaire cette commande ? (Y/N) : ").strip().upper()
+    if choix != "Y":
+        return None
+
+    nom_to_idx = {}
+    for idx_str, prod in product_map.items():
+        nom_to_idx[prod["nom"].lower()] = idx_str
+
+    cart_items = []
+    for item in last["items"]:
+        nom_lower = item["nom"].lower()
+        if nom_lower not in nom_to_idx:
+            print(f"  '{item['nom']}' n'est plus dans le menu, ignore.")
+            continue
+
+        idx_str = nom_to_idx[nom_lower]
+        article = product_map[idx_str]
+        old_q = item["quantite"]
+
+        q_input = input(f"  {item['nom']} (quantite precedente: {old_q}) : ").strip()
+        if q_input == "":
+            quantite = old_q
+        elif q_input.isdigit() and int(q_input) > 0:
+            quantite = int(q_input)
+        else:
+            quantite = old_q
+
+        cart_items.append({"article": article, "quantite": quantite})
+
+    return cart_items if cart_items else None
+
+
 def parse_args() -> dict:
     """Parse les arguments en ligne de commande."""
     args = {"visible": False, "help": False}
@@ -538,10 +583,12 @@ Description:
     Script de commande automatise pour KFC Senegal (kfcsenegal.sn).
     - Enregistre vos informations dans une base SQLite (une seule fois)
     - Zone par defaut : SICAP LIBERTE 1/4
+    - Recharge automatiquement votre derniere commande (modifiable)
     - Tapez 'lieu' pour changer de zone, 'nouveau' pour ajouter un profil
     - Affiche le menu et vous permet de choisir vos articles
     - Finalise la commande avec paiement en especes
     - Envoie un email de confirmation
+    - Enregistre l'historique des commandes
         """)
         return
 
@@ -573,9 +620,8 @@ Description:
                 print("  Impossible d'acceder au site. Verifiez votre connexion.")
                 return
 
-            selected_zone = ask_zone(page, user)
-
-            print(f"\n  Zone selectionnee : {selected_zone['name']}")
+            selected_zone = {"id": user["zone_id"], "name": user["zone_name"]}
+            print(f"\n  Zone : {selected_zone['name']}")
             print("  Selection de la zone sur le site...")
             select_zone_on_site(page, selected_zone["id"])
             print("  Zone configuree !")
@@ -624,56 +670,59 @@ Description:
 
             product_map = display_menu(products)
 
-            cart_items = []
-            continuer = True
-            while continuer:
-                choix_article = input("\n  Numero de l'article (ou 'lieu'/'nouveau') : ").strip()
+            cart_items = ask_reorder(product_map)
 
-                if choix_article.lower() == "lieu":
-                    selected_zone = ask_zone(page, user)
-                    print(f"\n  Nouvelle zone : {selected_zone['name']}")
-                    print("  Selection de la zone sur le site...")
-                    select_zone_on_site(page, selected_zone["id"])
-                    time.sleep(5)
-                    if not navigate_with_retry(page, RESTAURANT_DETAIL_URL):
-                        print("  Impossible de recharger le menu.")
-                        return
-                    time.sleep(5)
-                    products = scrape_menu(page) or scrape_menu_from_dom(page)
-                    if products:
-                        product_map = display_menu(products)
-                    continue
+            if cart_items is None:
+                cart_items = []
+                continuer = True
+                while continuer:
+                    choix_article = input("\n  Numero de l'article (ou 'lieu'/'nouveau') : ").strip()
 
-                if choix_article.lower() == "nouveau":
-                    print("\n  --- Nouveau profil ---")
-                    user = _ask_user_info()
-                    save_user(user["nom"], user["telephone"], user["email"], user["adresse"])
-                    print(f"  Profil '{user['nom']}' enregistre !")
-                    continue
+                    if choix_article.lower() == "lieu":
+                        selected_zone = ask_zone(page, user)
+                        print(f"\n  Nouvelle zone : {selected_zone['name']}")
+                        print("  Selection de la zone sur le site...")
+                        select_zone_on_site(page, selected_zone["id"])
+                        time.sleep(5)
+                        if not navigate_with_retry(page, RESTAURANT_DETAIL_URL):
+                            print("  Impossible de recharger le menu.")
+                            return
+                        time.sleep(5)
+                        products = scrape_menu(page) or scrape_menu_from_dom(page)
+                        if products:
+                            product_map = display_menu(products)
+                        continue
 
-                if choix_article not in product_map:
-                    print("  Numero invalide.")
-                    continue
+                    if choix_article.lower() == "nouveau":
+                        print("\n  --- Nouveau profil ---")
+                        user = _ask_user_info()
+                        save_user(user["nom"], user["telephone"], user["email"], user["adresse"])
+                        print(f"  Profil '{user['nom']}' enregistre !")
+                        continue
 
-                quantite_str = input("  Quantite (defaut: 1) : ").strip()
-                quantite = int(quantite_str) if quantite_str.isdigit() else 1
+                    if choix_article not in product_map:
+                        print("  Numero invalide.")
+                        continue
 
-                article = product_map[choix_article]
-                print(f"\n  Ajout : {article['nom']} x{quantite}")
+                    quantite_str = input("  Quantite (defaut: 1) : ").strip()
+                    quantite = int(quantite_str) if quantite_str.isdigit() else 1
 
-                success = add_to_cart_api(page, article["id"], quantite)
-                if not success:
-                    success = add_to_cart(page, article["id"], quantite)
+                    article = product_map[choix_article]
+                    print(f"\n  Ajout : {article['nom']} x{quantite}")
 
-                if success:
-                    cart_items.append({"article": article, "quantite": quantite})
-                    print("  Ajoute au panier !")
-                else:
-                    print("  Echec de l'ajout au panier.")
+                    success = add_to_cart_api(page, article["id"], quantite)
+                    if not success:
+                        success = add_to_cart(page, article["id"], quantite)
 
-                autre = input("\n  Autre chose ? (Y/N) : ").strip().upper()
-                if autre != "Y":
-                    continuer = False
+                    if success:
+                        cart_items.append({"article": article, "quantite": quantite})
+                        print("  Ajoute au panier !")
+                    else:
+                        print("  Echec de l'ajout au panier.")
+
+                    autre = input("\n  Autre chose ? (Y/N) : ").strip().upper()
+                    if autre != "Y":
+                        continuer = False
 
             if not cart_items:
                 print("\n  Panier vide. Commande annulee.")
@@ -688,6 +737,7 @@ Description:
             print("-------------------------------------")
 
             if checkout(page, user):
+                save_order(cart_items, selected_zone["id"], selected_zone["name"])
                 send_confirmation_email(user, cart_items, selected_zone["name"])
                 print("  Verifiez votre boite mail pour la confirmation.")
 

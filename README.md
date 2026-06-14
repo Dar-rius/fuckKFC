@@ -5,7 +5,8 @@ Script Python qui automatise les commandes sur [kfcsenegal.sn](https://kfcsenega
 ## Fonctionnalites
 
 - Enregistrement des informations utilisateur (nom, telephone, email, adresse) en base SQLite
-- Zone de livraison par defaut : **SICAP LIBERTE 1/4**
+- Zone de livraison par defaut : **SICAP LIBERTE 1/4** (selection automatique)
+- Historique des commandes avec rechargement automatique
 - 121 zones de livraison disponibles (recuperees depuis le site KFC)
 - Affichage du menu KFC Bourguiba avec categories et prix
 - Ajout d'articles au panier avec quantite
@@ -33,6 +34,13 @@ Script Python qui automatise les commandes sur [kfcsenegal.sn](https://kfcsenega
 | `N` | Garder le profil actuel |
 | Autre touche | Creer un nouveau profil |
 
+### Apres le chargement du menu
+
+| Entree | Description |
+|--------|-------------|
+| `Y` | Refaire la derniere commande |
+| `N` | Commander manuellement |
+
 ### Pendant la selection d'articles
 
 | Entree | Description |
@@ -46,7 +54,7 @@ Script Python qui automatise les commandes sur [kfcsenegal.sn](https://kfcsenega
 | Entree | Description |
 |--------|-------------|
 | `1`, `2`, `3`... | Quantite de l'article |
-| Entree vide | Quantite par defaut = 1 |
+| Entree vide | Quantite precedente ou defaut = 1 |
 
 ### Apres chaque ajout
 
@@ -84,21 +92,19 @@ uv run playwright install chromium
 
 ## Deroulement du script
 
-1. **Premier lancement** : le script demande nom, telephone, email et adresse. Ces donnees sont sauvegardees dans `kfc_users.db` pour les prochaines fois.
+1. **Premier lancement** : le script demande nom, telephone, email et adresse. Ces donnees sont sauvegardees dans `kfc_users.db`.
 
 2. **Zones suivantes** : les informations sont affichees. Options : `Y` modifier, `N` garder, ou autre touche pour creer un nouveau profil.
 
-3. **Selection de zone** : la zone actuelle (SICAP LIBERTE par defaut) est affichee avec les 121 zones KFC. Tu peux en choisir une autre.
+3. **Zone automatique** : la zone enregistree (SICAP LIBERTE par defaut) est selectionnee automatiquement sur le site.
 
-4. **Menu** : le menu KFC s'affiche avec les categories et prix. Entrez le numero de l'article et la quantite.
+4. **Menu + rechargement** : le menu s'affiche. Si tu as deja commande, le script propose de recharger ta derniere commande avec les memes articles. Tu peux modifier les quantites.
 
-5. **Commandes en cours de commande** :
-   - `lieu` pour changer la zone de livraison
-   - `nouveau` pour ajouter un autre profil
+5. **Commande manuelle** : sinon, entre les numeros des articles. Commandes utiles : `lieu` pour changer de zone, `nouveau` pour ajouter un profil.
 
-6. **Finalisation** : le script va sur la page de commande, remplit les informations, selectionne le paiement en especes et valide.
+6. **Finalisation** : le script remplit les informations, selectionne le paiement en especes et valide.
 
-7. **Email de confirmation** : un email est envoye avec le recapitulatif de la commande.
+7. **Email + historique** : un email de confirmation est envoye et la commande est enregistreee dans l'historique.
 
 ## Structure du projet
 
@@ -113,7 +119,9 @@ fuckKFC/
 
 ## Base de donnees
 
-Le fichier `kfc_users.db` est cree automatiquement au premier lancement. Table `users` :
+Le fichier `kfc_users.db` est cree automatiquement. Tables :
+
+### users
 
 | Champ      | Type   | Description                     |
 |------------|--------|---------------------------------|
@@ -124,6 +132,17 @@ Le fichier `kfc_users.db` est cree automatiquement au premier lancement. Table `
 | adresse    | TEXT   | Adresse de livraison            |
 | zone_id    | TEXT   | ID de la zone de livraison      |
 | zone_name  | TEXT   | Nom de la zone de livraison     |
+
+### orders
+
+| Champ      | Type   | Description                     |
+|------------|--------|---------------------------------|
+| id         | INTEGER| Identifiant auto-incremente     |
+| user_id    | INTEGER| ID de l'utilisateur             |
+| items      | TEXT   | Articles en JSON                |
+| zone_id    | TEXT   | ID de la zone                   |
+| zone_name  | TEXT   | Nom de la zone                  |
+| created_at | TEXT   | Date et heure de la commande    |
 
 ## Notes techniques
 
