@@ -86,7 +86,8 @@ def setup_user() -> dict:
         print("\n  (Y) Modifier  (N) Garder  (autre) Nouveau profil")
         choix = input("  > ").strip().upper()
         if choix == "Y":
-            user = _ask_user_info()
+            current_zone = {"id": user["zone_id"], "name": user["zone_name"]}
+            user = _ask_user_info(preserve_zone=current_zone)
             update_user(
                 nom=user["nom"], telephone=user["telephone"],
                 email=user["email"], adresse=user["adresse"],
@@ -97,32 +98,41 @@ def setup_user() -> dict:
             return user
         else:
             print("\n  --- Nouveau profil ---")
-            user = _ask_user_info()
-            save_user(user["nom"], user["telephone"], user["email"], user["adresse"])
+            user = _ask_user_info(preserve_zone={"id": user["zone_id"], "name": user["zone_name"]})
+            save_user(user["nom"], user["telephone"], user["email"], user["adresse"],
+                      user["zone_id"], user["zone_name"])
             print("  Nouveau profil enregistre !")
             return user
 
     print("\n  === Premier lancement ===")
     print("  Veuillez entrer vos informations pour la commande.\n")
     user = _ask_user_info()
-    save_user(user["nom"], user["telephone"], user["email"], user["adresse"])
+    save_user(user["nom"], user["telephone"], user["email"], user["adresse"],
+              user["zone_id"], user["zone_name"])
     print("\n  Informations enregistrees !")
     return user
 
 
-def _ask_user_info() -> dict:
-    """Demande les informations utilisateur (nom, telephone, email, adresse)."""
-    nom = input("  Nom complet : ").strip()
-    telephone = input("  Telephone   : ").strip()
-    email = input("  Email       : ").strip()
-    adresse = input("  Adresse     : ").strip()
+def _ask_user_info(preserve_zone: dict | None = None) -> dict:
+    """Demande les informations utilisateur (nom, telephone, email, adresse).
+    Si preserve_zone est fourni, garde la zone existante.
+    """
+    while True:
+        nom = input("  Nom complet : ").strip()
+        telephone = input("  Telephone   : ").strip()
+        email = input("  Email       : ").strip()
+        adresse = input("  Adresse     : ").strip()
+        if nom and telephone and adresse:
+            break
+        print("  ! Nom, telephone et adresse sont obligatoires.\n")
+    zone = preserve_zone or DEFAULT_ZONE
     return {
         "nom": nom,
         "telephone": telephone,
         "email": email,
         "adresse": adresse,
-        "zone_id": DEFAULT_ZONE["id"],
-        "zone_name": DEFAULT_ZONE["name"],
+        "zone_id": zone["id"],
+        "zone_name": zone["name"],
     }
 
 
@@ -322,9 +332,11 @@ def add_to_cart(page, product_id: str, quantite: int = 1) -> bool:
             f'button[onclick*="{product_id}"], '
             f'[data-product-id="{product_id}"] button'
         )
-        if btn:
-            btn.click()
-            time.sleep(1)
+        if not btn:
+            return False
+
+        btn.click()
+        time.sleep(1)
 
         if quantite > 1:
             plus_btn = page.query_selector(
@@ -470,7 +482,7 @@ def send_confirmation_email(user: dict, cart_items: list[dict], zone_name: str) 
 
     try:
         with smtplib.SMTP("localhost", 25, timeout=10) as server:
-            server.sendmail(msg["From"], [user["Email"]], msg.as_string())
+            server.sendmail(msg["From"], [user["email"]], msg.as_string())
         print("  Email envoye !")
     except Exception as e:
         print(f"  Envoi email echoue (non bloquant) : {e}")
@@ -546,6 +558,7 @@ def ask_reorder(product_map: dict) -> list[dict] | None:
         elif q_input.isdigit() and int(q_input) > 0:
             quantite = int(q_input)
         else:
+            print(f"  Quantite invalide, gardée a {old_q}.")
             quantite = old_q
 
         cart_items.append({"article": article, "quantite": quantite})
@@ -695,8 +708,10 @@ Description:
 
                     if choix_article.lower() == "nouveau":
                         print("\n  --- Nouveau profil ---")
-                        user = _ask_user_info()
-                        save_user(user["nom"], user["telephone"], user["email"], user["adresse"])
+                        current_zone = {"id": user["zone_id"], "name": user["zone_name"]}
+                        user = _ask_user_info(preserve_zone=current_zone)
+                        save_user(user["nom"], user["telephone"], user["email"], user["adresse"],
+                                  user["zone_id"], user["zone_name"])
                         print(f"  Profil '{user['nom']}' enregistre !")
                         continue
 
