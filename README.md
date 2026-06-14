@@ -1,159 +1,157 @@
-# KFC Senegal - Commande Automatisee
+# KFC Senegal - Automated Ordering
 
-Script Python qui automatise les commandes sur [kfcsenegal.sn](https://kfcsenegal.sn).
+Python script that automates orders on [kfcsenegal.sn](https://kfcsenegal.sn).
 
-## Fonctionnalites
+## Features
 
-- Enregistrement des informations utilisateur (nom, telephone, email, adresse) en base SQLite
-- Zone de livraison par defaut : **SICAP LIBERTE 1/4** (selection automatique)
-- Historique des commandes avec rechargement automatique
-- 121 zones de livraison disponibles (recuperees depuis le site KFC)
-- Affichage du menu KFC Bourguiba avec categories et prix
-- Ajout d'articles au panier avec quantite
-- Changement de zone de livraison a tout moment
-- Ajout de nouveaux profils utilisateurs
-- Finalisation de la commande avec paiement en especes
-- Envoi d'un email de confirmation apres la commande
-- Navigateur Chromium en mode headless (invisible) par defaut
+- User info storage (name, phone, email, address) in SQLite
+- Default delivery zone: **SICAP LIBERTE 1/4** (auto-selected)
+- Order history with auto-reload of last order
+- Delivery zones fetched from the KFC website
+- KFC Bourguiba menu display with categories and prices
+- Add items to cart with quantity
+- Change delivery zone at any time
+- Add new user profiles
+- Order checkout with cash payment
+- Chromium browser in headless mode (invisible) by default
 
-## Commandes disponibles
+## Commands
 
-### Ligne de commande
+### CLI
 
-| Commande | Description |
-|----------|-------------|
-| `uv run python kfc_order.py` | Lancer en mode headless (invisible) |
-| `uv run python kfc_order.py --visible` | Lancer en mode visible (navigateur affiche) |
-| `uv run python kfc_order.py --help` | Afficher l'aide |
+| Command | Description |
+|---------|-------------|
+| `uv run python kfc_order.py` | Launch in headless mode (invisible) |
+| `uv run python kfc_order.py --visible` | Launch in visible mode (browser shown) |
+| `uv run python kfc_order.py --help` | Show help |
 
-### Au demarrage (profil)
+### At startup (profile)
 
-| Entree | Description |
-|--------|-------------|
-| `Y` | Modifier les informations du profil |
-| `N` | Garder le profil actuel |
-| Autre touche | Creer un nouveau profil |
+| Input | Description |
+|-------|-------------|
+| `Y` | Edit profile info |
+| `N` | Keep current profile |
+| Any other key | Create a new profile |
 
-### Apres le chargement du menu
+### After menu loads
 
-| Entree | Description |
-|--------|-------------|
-| `Y` | Refaire la derniere commande |
-| `N` | Commander manuellement |
+| Input | Description |
+|-------|-------------|
+| `Y` | Reorder the last order |
+| `N` | Order manually |
 
-### Pendant la selection d'articles
+### During item selection
 
-| Entree | Description |
-|--------|-------------|
-| `1` a `999` | Numero de l'article a ajouter au panier |
-| `lieu` | Changer la zone de livraison (affiche les 121 zones KFC) |
-| `nouveau` | Ajouter un nouveau profil utilisateur |
+| Input | Description |
+|-------|-------------|
+| `1` to `999` | Item number to add to cart |
+| `lieu` | Change delivery zone |
+| `nouveau` | Add a new user profile |
 
-### Quantite
+### Quantity
 
-| Entree | Description |
-|--------|-------------|
-| `1`, `2`, `3`... | Quantite de l'article |
-| Entree vide | Quantite precedente ou defaut = 1 |
+| Input | Description |
+|-------|-------------|
+| `1`, `2`, `3`... | Item quantity |
+| Empty | Default = 1 |
 
-### Apres chaque ajout
+### After each addition
 
-| Entree | Description |
-|--------|-------------|
-| `Y` | Ajouter un autre article |
-| `N` | Terminer la selection, passer au paiement |
+| Input | Description |
+|-------|-------------|
+| `Y` | Add another item |
+| `N` | Finish selection, proceed to checkout |
 
-### Recapitulatif
+### Summary
 
-| Entree | Description |
-|--------|-------------|
-| `Y` | Confirmer et valider la commande |
-| `N` | Annuler la commande |
+| Input | Description |
+|-------|-------------|
+| `Y` | Confirm and place order |
+| `N` | Cancel order |
 
-## Prerequis
+## Prerequisites
 
 - Python >= 3.10
-- [UV](https://docs.astral.sh/uv/) (gestionnaire de paquets Python)
-- Playwright (installe automatiquement via UV)
+- [UV](https://docs.astral.sh/uv/) (Python package manager)
+- Playwright (installed automatically via UV)
 
 ## Installation
 
 ```bash
-# Cloner le depot
+# Clone the repo
 git clone git@github.com:Dar-rius/fuckKFC.git
 cd fuckKFC
 
-# Installer les dependances avec UV
+# Install dependencies with UV
 uv sync
 
-# Installer le navigateur Chromium pour Playwright
+# Install Chromium for Playwright
 uv run playwright install chromium
 ```
 
-## Deroulement du script
+## How it works
 
-1. **Premier lancement** : le script demande nom, telephone, email et adresse. Ces donnees sont sauvegardees dans `kfc_users.db`.
+1. **First run**: the script asks for name, phone, email and address. Data is saved to `kfc_users.db`.
 
-2. **Zones suivantes** : les informations sont affichees. Options : `Y` modifier, `N` garder, ou autre touche pour creer un nouveau profil.
+2. **Subsequent runs**: info is displayed. Options: `Y` to edit, `N` to keep, or any other key for a new profile.
 
-3. **Zone automatique** : la zone enregistree (SICAP LIBERTE par defaut) est selectionnee automatiquement sur le site.
+3. **Auto zone**: the saved zone (SICAP LIBERTE by default) is auto-selected on the site.
 
-4. **Menu + rechargement** : le menu s'affiche. Si tu as deja commande, le script propose de recharger ta derniere commande avec les memes articles. Tu peux modifier les quantites.
+4. **Menu + reorder**: the menu is displayed. If you've ordered before, the script offers to reload your last order with the same items. You can modify quantities.
 
-5. **Commande manuelle** : sinon, entre les numeros des articles. Commandes utiles : `lieu` pour changer de zone, `nouveau` pour ajouter un profil.
+5. **Manual ordering**: otherwise, enter item numbers. Useful commands: `lieu` to change zone, `nouveau` to add a profile.
 
-6. **Finalisation** : le script remplit les informations, selectionne le paiement en especes et valide.
+6. **Checkout**: the script fills in your info, selects cash payment, and confirms.
 
-7. **Email + historique** : un email de confirmation est envoye et la commande est enregistreee dans l'historique.
+7. **History**: the order is saved to history for future reordering.
 
-## Structure du projet
+## Project structure
 
 ```
 fuckKFC/
-├── pyproject.toml     # Configuration UV et dependances
-├── README.md          # Cette documentation
-├── kfc_order.py       # Script principal
-├── database.py        # Module de gestion SQLite3
-└── kfc_users.db       # Base de donnees (generee automatiquement)
+├── pyproject.toml     # UV config and dependencies
+├── README.md          # This documentation
+├── kfc_order.py       # Main script
+├── database.py        # SQLite3 database module
+└── kfc_users.db       # Database (auto-generated)
 ```
 
-## Base de donnees
+## Database
 
-Le fichier `kfc_users.db` est cree automatiquement. Tables :
+`kfc_users.db` is created automatically. Tables:
 
 ### users
 
-| Champ      | Type   | Description                     |
-|------------|--------|---------------------------------|
-| id         | INTEGER| Identifiant auto-incremente     |
-| nom        | TEXT   | Nom complet                     |
-| telephone  | TEXT   | Numero de telephone             |
-| email      | TEXT   | Adresse email                   |
-| adresse    | TEXT   | Adresse de livraison            |
-| zone_id    | TEXT   | ID de la zone de livraison      |
-| zone_name  | TEXT   | Nom de la zone de livraison     |
+| Field     | Type    | Description                |
+|-----------|---------|----------------------------|
+| id        | INTEGER | Auto-incremented ID        |
+| nom       | TEXT    | Full name                  |
+| telephone | TEXT    | Phone number               |
+| email     | TEXT    | Email address              |
+| adresse   | TEXT    | Delivery address           |
+| zone_id   | TEXT    | Delivery zone ID           |
+| zone_name | TEXT    | Delivery zone name         |
 
 ### orders
 
-| Champ      | Type   | Description                     |
-|------------|--------|---------------------------------|
-| id         | INTEGER| Identifiant auto-incremente     |
-| user_id    | INTEGER| ID de l'utilisateur             |
-| items      | TEXT   | Articles en JSON                |
-| zone_id    | TEXT   | ID de la zone                   |
-| zone_name  | TEXT   | Nom de la zone                  |
-| created_at | TEXT   | Date et heure de la commande    |
+| Field     | Type    | Description                |
+|-----------|---------|----------------------------|
+| id        | INTEGER | Auto-incremented ID        |
+| user_id   | INTEGER | User ID                    |
+| items     | TEXT    | Items as JSON              |
+| zone_id   | TEXT    | Zone ID                    |
+| zone_name | TEXT    | Zone name                  |
+| created_at| TEXT    | Order date and time        |
 
-## Notes techniques
+## Technical notes
 
-- Le site kfcsenegal.sn est une SPA Laravel Inertia.js + Vue 3
-- Le script utilise Playwright pour interagir avec le navigateur
-- Le paiement est configure en especes par defaut
-- Les zones de livraison sont extraites depuis la page d'accueil du site
-- Le menu est charge dynamiquement par le site
-- Le site a un systeme de rate-limiting : si vous voyez "HTTP 429", le script attend automatiquement
-- L'email de confirmation est envoye via SMTP local (port 25)
+- kfcsenegal.sn is a Laravel Inertia.js + Vue 3 SPA
+- Playwright is used to interact with the browser
+- Payment defaults to cash on delivery
+- Delivery zones are extracted from the site's landing page
+- Menu is loaded dynamically by the site
+- The site has rate-limiting: if you see "HTTP 429", the script waits automatically
 
-## Auteurs
+## Authors
 
 - [Dar-rius](https://github.com/Dar-rius)

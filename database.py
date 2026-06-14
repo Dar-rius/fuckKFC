@@ -1,6 +1,6 @@
 """
-Module de gestion de la base de donnees SQLite3.
-Stocke les informations utilisateur et l'historique des commandes.
+SQLite3 database module.
+Stores user information and order history.
 """
 
 import json
@@ -20,7 +20,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Cree les tables si elles n'existent pas, ou met a jour le schema."""
+    """Create tables if they don't exist, or update schema."""
     with get_connection() as conn:
         conn.execute(
             """
@@ -62,6 +62,7 @@ def init_db() -> None:
 
 # ── User ──────────────────────────────────────────────────────────────
 
+
 def save_user(nom: str, telephone: str, email: str, adresse: str,
               zone_id: str = "90", zone_name: str = "SICAP LIBERTE 1/4") -> None:
     with get_connection() as conn:
@@ -90,27 +91,20 @@ def get_user() -> dict | None:
             "SELECT nom, telephone, email, adresse, zone_id, zone_name FROM users ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if row:
-            return {
-                "nom": row["nom"],
-                "telephone": row["telephone"],
-                "email": row["email"],
-                "adresse": row["adresse"],
-                "zone_id": row["zone_id"],
-                "zone_name": row["zone_name"],
-            }
+            return {key: row[key] for key in ("nom", "telephone", "email", "adresse", "zone_id", "zone_name")}
         return None
 
 
 def user_exists() -> bool:
     with get_connection() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        return count > 0
+        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
 
 
 # ── Orders ────────────────────────────────────────────────────────────
 
+
 def save_order(cart_items: list[dict], zone_id: str, zone_name: str) -> None:
-    """Enregistre une commande (articles + zone)."""
+    """Save an order (items + zone)."""
     user = get_user()
     if not user:
         return
@@ -128,7 +122,7 @@ def save_order(cart_items: list[dict], zone_id: str, zone_name: str) -> None:
 
 
 def get_last_order() -> dict | None:
-    """Recupere la derniere commande de l'utilisateur."""
+    """Get the user's most recent order."""
     with get_connection() as conn:
         uid_row = conn.execute("SELECT id FROM users ORDER BY id DESC LIMIT 1").fetchone()
         if not uid_row:
@@ -145,12 +139,3 @@ def get_last_order() -> dict | None:
                 "created_at": row["created_at"],
             }
         return None
-
-
-def has_orders() -> bool:
-    with get_connection() as conn:
-        uid_row = conn.execute("SELECT id FROM users ORDER BY id DESC LIMIT 1").fetchone()
-        if not uid_row:
-            return False
-        count = conn.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (uid_row["id"],)).fetchone()[0]
-        return count > 0
